@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8">
+  <title>Přehled amerických dividend z e-Brokeru</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="author" content="Ing. Ondřej Hanák; https://ondrejhanak.cz">
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2em; }
+    h1 { font-size: 1.5em; margin-bottom: 0.5em; }
+    p { line-height: 1.4; margin-bottom: 1em; }
+    a { color: blue; }
+    #csvFileInput { margin-bottom: 1em; }
+    table { border-collapse: collapse; margin-top: 1em; }
+    th, td { border: 1px solid #ccc; padding: 0.5em; }
+    th { background-color: #f4f4f4; text-align: left; }
+    td.right { text-align: right; }
+    .error { color: red; }
+    #dropZone {
+      border: 2px dashed #aaa;
+      padding: 2em;
+      display: inline-block;
+      text-align: center;
+      color: #666;
+      margin-bottom: 1em;
+      cursor: pointer;
+      background-color: #f9f9f9;
+    }
+    #dropZone.dragover {
+      border-color: #444;
+      color: #444;
+      background-color: #f0f0f0;
+    }
+    th.right { text-align: right; }
+    #csvFileInput {
+      display: none;
+    }
+    #footer {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      width: 100%;
+      background-color: #f4f4f4;
+      text-align: center;
+      padding: 0.75em 0;
+      font-size: 0.9em;
+      box-shadow: 0 -1px 3px rgba(0, 0, 0, 0.1);
+    }
+    #github-fork-ribbon {
+  position: fixed;
+  top: 0;
+  right: 0;
+  border: 0;
+  z-index: 1001;
+}
+  </style>
+</head>
+<body>
+  <h1>Přehled dividend a daní zaplacených v USA přes Fio e-Broker</h1>
+
+  <p>Nahrajte CSV export obchodů za rok z e-Brokeru. Skript pak vytvoří souhrnnou tabulku příjmů a daní zaplacených v USA.</p>
+
+  <p>Zpracování probíhá výhradně v prohlížeči, data se nikam neodesílají ani neukládají a neprobíhá žádná analytika.</p>
+
+  <p>Pokud něco nefunguje dle očekávání, kontaktujte mě prosím přes <a href="https://ondrejhanak.cz">web</a>. V žádném případě nenesu zodpovědnost za výsledky ani za to, jak s nimi naložíte. Kontrola správnosti je na vás.</p>
+  
+  <div id="dropZone">Přetáhněte sem CSV nebo klikněte pro výběr.</div>
+  <input type="file" id="csvFileInput" accept=".csv">
+  <div id="tableContainer"></div>
+
+  <!-- PapaParse pro snadné parsování CSV -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script>
+    const input = document.getElementById('csvFileInput');
+    const container = document.getElementById('tableContainer');
+    const dropZone = document.getElementById('dropZone');
+    
+    ['dragenter','dragover'].forEach(eventName => {
+      dropZone.addEventListener(eventName, e => {
+        e.preventDefault(); e.stopPropagation();
+        dropZone.classList.add('dragover');
+      });
+    });
+    ['dragleave','dragend'].forEach(eventName => {
+      dropZone.addEventListener(eventName, e => {
+        e.preventDefault(); e.stopPropagation();
+        dropZone.classList.remove('dragover');
+      });
+    });
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault(); e.stopPropagation();
+      dropZone.classList.remove('dragover');
+      handleFile(e.dataTransfer.files[0]);
+    });
+    dropZone.addEventListener('click', () => input.click());
+
+    function handleFile(file) {
+      container.innerHTML = '';
+      if (!file) {
+        container.innerHTML = '<p class="error">Nebyl vybrán žádný soubor.</p>';
+        return;
+      }
+      const reader = new FileReader();
+      reader.onerror = () => {
+        container.innerHTML = '<p class="error">Chyba při čtení souboru: ' + reader.error + '</p>';
+      };
+      reader.onload = e => {
+        const arrayBuffer = e.target.result;
+        const text = new TextDecoder('windows-1250').decode(arrayBuffer);
+        const lines = text.split(/\r?\n/);
+        const headerIndex = lines.findIndex(l => l.startsWith('Datum obchodu')) || 0;
+        const csvText = lines.slice(headerIndex).join('\n');
+        Papa.parse(csvText, {
+          header: true,
+          delimiter: ';',
+          skipEmptyLines: true,
+          complete: results => processData(results.data),
+          error: err => {
+            container.innerHTML = '<p class="error">Chyba při parsování: ' + err.message + '</p>';
+          }
+        });
+      };
+      reader.readAsArrayBuffer(file);
+    }
+
+    input.addEventListener('change', () => {
+      handleFile(input.files[0]);
+    });
+
+    function processData(rows) {
+      const summary = {};
+
+      rows.forEach(row => {
+        if (row['Měna'] !== 'USD') return;
+
+        const ticker = row['Symbol'];
+        const textFIO = row['Text FIO'] || '';
+        // remove whitespace, replace decimal comma by point
+        const raw = (row['Objem v USD'] || '').replace(/\s/g, '').replace(',', '.');
+        const amount = parseFloat(raw);
+        if (isNaN(amount)) return;
+
+        if (!summary[ticker]) {
+          summary[ticker] = { dividends: 0, taxes: 0 };
+        }
+
+        if (/oprava daně z dividendy/i.test(textFIO)) {
+          summary[ticker].taxes -= Math.abs(amount);
+        } else if (/dividenda/i.test(textFIO)) {
+          summary[ticker].dividends += amount;
+        } else if (/daň/i.test(textFIO)) {
+          summary[ticker].taxes += Math.abs(amount);
+        }
+      });
+
+      renderTable(summary);
+    }
+
+    function renderTable(summary) {
+      const tickers = Object.keys(summary)
+        .filter(t => summary[t].dividends > 0)
+        .sort();
+      if (tickers.length === 0) {
+        container.innerHTML = '<p>Nebyly nalezeny žádné dividendy v USD.</p>';
+        return;
+      }
+
+      let html = '<table><thead><tr>'
+        + '<th>Symbol</th>'
+        + '<th>Dividendy USD</th>'
+        + '<th>Daně USD</th>'
+        + '<th>Daně %</th>'
+        + '</tr></thead><tbody>';
+
+      tickers.forEach(t => {
+        const s = summary[t];
+        html += '<tr>'
+          + `<td>${escapeHtml(t)}</td>`
+          + `<td class="right">${s.dividends.toLocaleString('cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>`
+          + `<td class="right">${s.taxes.toLocaleString('cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>`
+          + `<td class="right">${
+              s.dividends > 0
+                ? (s.taxes / s.dividends * 100).toLocaleString('cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2})
+                : 'N/A'
+            }</td>`
+          + '</tr>';
+      });
+
+      const totalDividends = tickers.reduce((sum, t) => sum + summary[t].dividends, 0);
+      const totalTaxes = tickers.reduce((sum, t) => sum + summary[t].taxes, 0);
+      html += '<tr>'
+        + '<th>Celkem</th>'
+        + `<th class="right">${totalDividends.toLocaleString('cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2})}</th>`
+        + `<th class="right">${totalTaxes.toLocaleString('cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2})}</th>`
+        + `<th class="right">${(totalTaxes / totalDividends * 100).toLocaleString('cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2})}%</th>`
+        + '</tr>';
+
+      html += '</tbody></table>';
+      container.innerHTML = html;
+    }
+
+    function escapeHtml(str) {
+      return str == null ? '' : str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function adjustFooterPadding() {
+      const footer = document.getElementById('footer');
+      document.body.style.paddingBottom = footer.offsetHeight + 'px';
+    }
+
+    window.addEventListener('load', adjustFooterPadding);
+    window.addEventListener('resize', adjustFooterPadding);
+</script>
+
+  <div id="footer">
+     Vytvořil <a href="https://ondrejhanak.cz" target="_blank" rel="noopener">Ondřej Hanák</a>
+  </div>
+
+  <a id="github-fork-ribbon"
+   href="https://github.com/ondrejhanak/ebroker-dividends"
+   target="_blank"
+   rel="noopener">
+  <img loading="lazy"
+       decoding="async"
+       width="149" height="149"
+       src="https://github.blog/wp-content/uploads/2008/12/forkme_right_green_007200.png"
+       alt="Fork me on GitHub">
+  </a>
+</body>
+</html>
